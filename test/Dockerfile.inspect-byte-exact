@@ -1,0 +1,10 @@
+# Fixture for assert-inspect-byte-exact.sh. Neither RUN step needs CA trust
+# (the apt bootstrap here is plain HTTP), so the same Dockerfile should
+# produce byte-identical layers under any engine.
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
+
+SHELL ["/bin/sh", "-c"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
+
+RUN echo "no CA use here"

@@ -140,6 +140,22 @@ func removeCA(path string) error {
 	return os.WriteFile(path, append(content[:start:start], content[end:]...), 0o644)
 }
 
+// containerPathOf converts a path already resolved inside rootfs back to how
+// the container itself sees it. The mount destination for a dirBind has to be
+// this, not the candidate path's own directory: on RHEL the candidate is a
+// symlink (/etc/pki/tls/certs/ca-bundle.crt) whose real file lives elsewhere
+// (/etc/pki/ca-trust/extracted/pem/), and binding over the symlink's
+// directory would shadow the wrong place.
+func containerPathOf(rootfs, resolved string) string {
+	if !strings.HasPrefix(resolved, rootfs) {
+		return "/"
+	}
+	if rel := strings.TrimPrefix(resolved, rootfs); rel != "" {
+		return rel
+	}
+	return "/"
+}
+
 // findSystemStore returns the container's own CA bundle, as a path inside the
 // rootfs and as the path the container refers to it by.
 func findSystemStore(rootfs string) (hostPath, containerPath string, err error) {

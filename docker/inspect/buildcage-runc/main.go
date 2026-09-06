@@ -79,7 +79,7 @@ func main() {
 	// `run` only, not `create`: restore is tied to the wrapped process exiting,
 	// but `runc create` returns before the process runs, so the CA would be gone
 	// by `runc start`. BuildKit's runcexecutor uses `run`.
-	var restore func()
+	var restore func() error
 	if sub == "run" && bundle != "" {
 		ca, err := os.ReadFile(caFile)
 		if err != nil {
@@ -126,7 +126,12 @@ func main() {
 		}
 	}
 	if restore != nil {
-		restore()
+		if err := restore(); err != nil {
+			logf("CA write-back failed, failing the build: %v", err)
+			if code == 0 {
+				code = 1
+			}
+		}
 	}
 	os.Exit(code)
 }

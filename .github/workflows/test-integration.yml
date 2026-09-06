@@ -187,6 +187,10 @@ jobs:
         if: contains(matrix.mode, 'inspect')
         run: ./test/assert-inspect-no-ca-residue.sh buildcage-test
 
+      - name: Verify no per-layer CA bundle duplication
+        if: contains(matrix.mode, 'inspect')
+        run: ./test/assert-inspect-no-layer-bloat.sh buildcage-test
+
       - name: Show logs
         if: always()
         env:
@@ -247,6 +251,33 @@ jobs:
         env:
           COMPOSE_FILE: compose.yaml:compose.test-inspect.yaml
         run: docker compose down -v --rmi all 2>/dev/null || true
+
+  test_inspect_byte_exact:
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.test == 'true'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    name: "integration: test (inspect byte-exact)"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-vp
+
+      # Brings up inspect, then universal, one after the other (both use the
+      # same builder name), so this is one script rather than a matrix entry.
+      - name: Compare inspect and universal layer-for-layer
+        run: make test_integration_buildkit_inspect_byte_exact
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose -p buildcage-project down -v --rmi all 2>/dev/null || true
+          rm -f /tmp/buildcage-byte-exact-inspect.tar /tmp/buildcage-byte-exact-universal.tar
 
   test_multiarch:
     needs: changes
@@ -337,7 +368,7 @@ jobs:
   integration-tests-passed:
     name: Integration tests passed
     runs-on: ubuntu-latest
-    needs: [changes, test, test_inspect_roundtrip, test_multiarch]
+    needs: [changes, test, test_inspect_roundtrip, test_inspect_byte_exact, test_multiarch]
     if: always()
     permissions: {}
     steps:

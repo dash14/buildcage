@@ -302,11 +302,16 @@ behavior, see [Inspect Proxy Engine](./security.md#inspect-proxy-engine) in Secu
 
 - **`buildcage-runc`** (`docker/inspect/buildcage-runc/`) wraps BuildKit's own `buildkit-runc`,
   selected via `[worker.oci] binary` in `buildkitd.toml`. For the subcommands that carry an OCI
-  bundle, it writes the proxy's CA and the CA-trust environment variables (see
-  [CA trust and compatibility](../README.md#ca-trust-and-compatibility)) into the bundle's rootfs,
-  runs the real `runc`, then removes them before BuildKit commits the resulting layer as a
-  snapshot. This happens at exec time, entirely outside LLB, so it cannot affect a cache key: two
-  builds that differ only in `proxy_engine` still share cache.
+  bundle, it sets the CA-trust environment variables (see
+  [CA trust and compatibility](../README.md#ca-trust-and-compatibility)) directly, and for the CA
+  itself, mirrors the step's CA store directory into a scratch copy, appends the CA there, and
+  bind-mounts the copy over the step's view of the real directory for the step's duration. Once the
+  real `runc` exits, that mirror is compared against its state right after the CA was added: if
+  nothing else changed, the real directory was never opened for writing, so BuildKit's layer diff for
+  that step is unaffected; only a step that actually changed the store gets that change synced back.
+  This is what keeps a step that never touches its CA store from producing a different layer than an
+  unmodified build would. Either way this happens at exec time, entirely outside LLB, so it cannot
+  affect a cache key: two builds that differ only in `proxy_engine` still share cache.
 - The `allowed_url_rules` compiler enumerates hosts rather than generalizing them
   (`a.example.com`/`b.example.com` never becomes `*.example.com`), because CoreDNS's own allow/deny
   view is generated from the same host patterns. Widening a host widens what's logged as allowed

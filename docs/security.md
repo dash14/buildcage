@@ -43,9 +43,10 @@ Two components, plus a wrapper around runc:
   `abc*.amazonaws.com` be logged accurately instead of collapsing to everything under
   `amazonaws.com`.
 - **`buildcage-runc`** wraps BuildKit's own `buildkit-runc`. For the subcommands that carry a
-  bundle it makes the step trust the proxy's CA, runs the real runc, then undoes that before
-  BuildKit commits the snapshot. Injection happens at exec time, never touches LLB, and so cannot
-  affect a cache key.
+  bundle it makes the step trust the proxy's CA by bind-mounting a scratch copy of the CA store over
+  the step's own view of it, writing back to the real one only if the step actually changed it, so a
+  step that never touches its CA store leaves no trace of the injection in the image layers.
+  Injection happens at exec time, never touches LLB, and so cannot affect a cache key.
 
 Like `universal`, this engine governs `RUN` step traffic only: its iptables rule redirects what
 arrives on the CNI bridge. `FROM` (`docker-image://`) is unaffected, buildkitd's own egress being

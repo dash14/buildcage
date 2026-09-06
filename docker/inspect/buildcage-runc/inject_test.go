@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,11 +80,39 @@ func loadEnv(t *testing.T, bundle string) map[string]string {
 	return s.env
 }
 
+func loadMounts(t *testing.T, bundle string) []map[string]any {
+	t.Helper()
+	s, err := loadSpec(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := s.raw["mounts"].([]any)
+	mounts := make([]map[string]any, 0, len(raw))
+	for _, m := range raw {
+		if entry, ok := m.(map[string]any); ok {
+			mounts = append(mounts, entry)
+		}
+	}
+	return mounts
+}
+
+func findMount(t *testing.T, mounts []map[string]any, dest string) map[string]any {
+	t.Helper()
+	for _, m := range mounts {
+		if m["destination"] == dest {
+			return m
+		}
+	}
+	t.Fatalf("no mount for %s", dest)
+	return nil
+}
+
 // Additive variables (NODE_EXTRA_CA_CERTS, DENO_CERT) get their own file
 // holding only the proxy's CA, so a tool's built-in bundle stays intact.
 // Replacing variables (REQUESTS_CA_BUNDLE, PIP_CERT, SSL_CERT_FILE) get
 // pointed at the system store instead, which already carries both.
 func TestInjectSetsEachUnsetVariableAccordingToItsKind(t *testing.T) {
+	useFakeRsync(t)
 	bundle, rootfs := newBundle(t, []string{"PATH=/usr/bin"})
 
 	restore, err := inject(bundle, []byte("BUILDCAGE-CA"))
@@ -118,12 +147,24 @@ func TestInjectSetsEachUnsetVariableAccordingToItsKind(t *testing.T) {
 		t.Error("CURL_CA_BUNDLE should be left unset; curl already reads the system store")
 	}
 
+	// The CA goes into the scratch mirror bind-mounted over the store's
+	// directory, never into the real rootfs directly.
+	mount := findMount(t, loadMounts(t, bundle), "/etc/ssl/certs")
+	scratchDir, _ := mount["source"].(string)
+	mirrored, err := os.ReadFile(filepath.Join(scratchDir, "ca-certificates.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(mirrored), "BUILDCAGE-CA") || !strings.HasPrefix(string(mirrored), "ORIGINAL-ROOTS") {
+		t.Fatalf("scratch mirror not patched correctly: %q", mirrored)
+	}
+
 	store, err := os.ReadFile(filepath.Join(rootfs, "etc", "ssl", "certs", "ca-certificates.crt"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(store), "BUILDCAGE-CA") || !strings.HasPrefix(string(store), "ORIGINAL-ROOTS") {
-		t.Fatalf("system store not patched correctly: %q", store)
+	if string(store) != "ORIGINAL-ROOTS\n" {
+		t.Fatalf("the real store must stay untouched until the step changes it: %q", store)
 	}
 }
 
@@ -131,6 +172,7 @@ func TestInjectSetsEachUnsetVariableAccordingToItsKind(t *testing.T) {
 // choice; the CA is appended to that file instead of the variable being
 // redirected, so whatever the author put there is not discarded.
 func TestInjectAppendsToAnAlreadySetVariableInstead(t *testing.T) {
+	useFakeRsync(t)
 	bundle, rootfs := newBundle(t, []string{"DENO_CERT=/custom/roots.pem"})
 	if err := os.MkdirAll(filepath.Join(rootfs, "custom"), 0o755); err != nil {
 		t.Fatal(err)
@@ -149,35 +191,124 @@ func TestInjectAppendsToAnAlreadySetVariableInstead(t *testing.T) {
 	if env["DENO_CERT"] != "/custom/roots.pem" {
 		t.Fatalf("DENO_CERT was redirected to %q", env["DENO_CERT"])
 	}
-	custom, err := os.ReadFile(filepath.Join(rootfs, "custom", "roots.pem"))
+
+	mount := findMount(t, loadMounts(t, bundle), "/custom")
+	scratchDir, _ := mount["source"].(string)
+	custom, err := os.ReadFile(filepath.Join(scratchDir, "roots.pem"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(custom), "BUILDCAGE-CA") {
 		t.Fatal("the CA was not appended to the custom file")
 	}
+
+	real, err := os.ReadFile(filepath.Join(rootfs, "custom", "roots.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(real) != "CUSTOM\n" {
+		t.Fatalf("the real file must stay untouched until the step changes it: %q", real)
+	}
 }
 
-// restore removes exactly what inject added, leaving the step's own content
-// (in the system store and in config.json) untouched.
-func TestInjectRestoreUndoesTheFilesOnly(t *testing.T) {
+// A step that never touches the store leaves the real rootfs file alone:
+// finish() finds the scratch mirror unchanged from its post-injection
+// baseline and never writes back.
+func TestInjectFinishLeavesAnUntouchedStoreAlone(t *testing.T) {
+	useFakeRsync(t)
 	bundle, rootfs := newBundle(t, []string{"PATH=/usr/bin"})
 
 	restore, err := inject(bundle, []byte("BUILDCAGE-CA"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	restore()
+	if err := restore(); err != nil {
+		t.Fatal(err)
+	}
 
 	store, err := os.ReadFile(filepath.Join(rootfs, "etc", "ssl", "certs", "ca-certificates.crt"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(store) != "ORIGINAL-ROOTS\n" {
-		t.Fatalf("system store not restored: %q", store)
+		t.Fatalf("the real store was written to even though nothing changed: %q", store)
 	}
 	if _, err := os.Stat(filepath.Join(rootfs, strings.TrimPrefix(ownCAPath, "/"))); !os.IsNotExist(err) {
 		t.Fatalf("own CA file still present: %v", err)
+	}
+}
+
+// A step that regenerates the store (e.g. apt-get install --reinstall
+// ca-certificates) gets its change mirrored back onto the real rootfs.
+func TestInjectWritesBackWhenTheStepChangesTheStore(t *testing.T) {
+	useFakeRsync(t)
+	bundle, rootfs := newBundle(t, []string{"PATH=/usr/bin"})
+
+	restore, err := inject(bundle, []byte("BUILDCAGE-CA"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mount := findMount(t, loadMounts(t, bundle), "/etc/ssl/certs")
+	scratchDir, _ := mount["source"].(string)
+	if err := os.WriteFile(filepath.Join(scratchDir, "ca-certificates.crt"), []byte("REGENERATED\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int
+	orig := runRsync
+	runRsync = func(args []string) ([]byte, error) {
+		calls++
+		return orig(args)
+	}
+	defer func() { runRsync = orig }()
+
+	if err := restore(); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("got %d rsync invocations for the write-back, want 2 (dry run, then apply)", calls)
+	}
+
+	got, err := os.ReadFile(filepath.Join(rootfs, "etc", "ssl", "certs", "ca-certificates.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "REGENERATED\n" {
+		t.Fatalf("write-back did not reach the real store: %q", got)
+	}
+}
+
+// A failure applying the write-back must fail the build rather than ship a
+// half-written layer.
+func TestInjectWriteBackFailurePropagates(t *testing.T) {
+	useFakeRsync(t)
+	bundle, _ := newBundle(t, []string{"PATH=/usr/bin"})
+
+	restore, err := inject(bundle, []byte("BUILDCAGE-CA"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mount := findMount(t, loadMounts(t, bundle), "/etc/ssl/certs")
+	scratchDir, _ := mount["source"].(string)
+	if err := os.WriteFile(filepath.Join(scratchDir, "ca-certificates.crt"), []byte("REGENERATED\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls int
+	orig := runRsync
+	runRsync = func(args []string) ([]byte, error) {
+		calls++
+		if calls == 2 { // the apply, right after a successful dry run
+			return []byte("boom"), fmt.Errorf("simulated failure")
+		}
+		return orig(args)
+	}
+	defer func() { runRsync = orig }()
+
+	if err := restore(); err == nil {
+		t.Fatal("expected the write-back failure to propagate")
 	}
 }
 

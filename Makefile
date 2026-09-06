@@ -154,7 +154,7 @@ report_buildkit: ## Show the buildcage report for the currently running builder
 # ---------------------------------------------------------------------------
 
 .PHONY: test_integration_buildkit
-test_integration_buildkit: test_integration_buildkit_universal_audit test_integration_buildkit_universal_restrict test_integration_buildkit_universal_restrict_no_traffic test_integration_buildkit_explicit_audit test_integration_buildkit_explicit_restrict test_integration_buildkit_inspect_audit test_integration_buildkit_inspect_restrict test_integration_buildkit_inspect_debian_audit test_integration_buildkit_inspect_debian_restrict test_integration_buildkit_inspect_roundtrip ## Run all buildkit integration tests
+test_integration_buildkit: test_integration_buildkit_universal_audit test_integration_buildkit_universal_restrict test_integration_buildkit_universal_restrict_no_traffic test_integration_buildkit_explicit_audit test_integration_buildkit_explicit_restrict test_integration_buildkit_inspect_audit test_integration_buildkit_inspect_restrict test_integration_buildkit_inspect_debian_audit test_integration_buildkit_inspect_debian_restrict test_integration_buildkit_inspect_byte_exact test_integration_buildkit_inspect_roundtrip ## Run all buildkit integration tests
 
 .PHONY: test_integration_buildkit_universal_audit
 test_integration_buildkit_universal_audit: ## Run universal-engine audit mode tests
@@ -247,6 +247,7 @@ test_integration_buildkit_inspect_audit: ## Run inspect-engine audit mode tests
 	  --progress=plain -f test/Dockerfile.inspect-audit test/ \
 	  --load -t buildcage-test
 	@./test/assert-inspect-no-ca-residue.sh buildcage-test
+	@./test/assert-inspect-no-layer-bloat.sh buildcage-test
 	@node report/src/main.ts || true
 	@./test/assert-inspect-audit.sh
 	@node src/post.ts
@@ -264,6 +265,7 @@ test_integration_buildkit_inspect_restrict: ## Run inspect-engine restrict mode 
 	  --progress=plain -f test/Dockerfile.inspect-restrict test/ \
 	  --load -t buildcage-test
 	@./test/assert-inspect-no-ca-residue.sh buildcage-test
+	@./test/assert-inspect-no-layer-bloat.sh buildcage-test
 	@node report/src/main.ts || true
 	@./test/assert-inspect-restrict.sh
 	@node src/post.ts
@@ -281,6 +283,7 @@ test_integration_buildkit_inspect_debian_audit: ## Run inspect-engine audit mode
 	  --progress=plain -f test/Dockerfile.inspect-debian test/ \
 	  --load -t buildcage-test
 	@./test/assert-inspect-no-ca-residue.sh buildcage-test
+	@./test/assert-inspect-no-layer-bloat.sh buildcage-test
 	@node report/src/main.ts || true
 	@./test/assert-inspect-debian.sh
 	@TEST_COMPOSE_FILE=compose.test-inspect.yaml $(MAKE) clean_buildkit
@@ -296,9 +299,38 @@ test_integration_buildkit_inspect_debian_restrict: ## Run inspect-engine restric
 	  --progress=plain -f test/Dockerfile.inspect-debian test/ \
 	  --load -t buildcage-test
 	@./test/assert-inspect-no-ca-residue.sh buildcage-test
+	@./test/assert-inspect-no-layer-bloat.sh buildcage-test
 	@node report/src/main.ts || true
 	@./test/assert-inspect-debian.sh
 	@TEST_COMPOSE_FILE=compose.test-inspect.yaml $(MAKE) clean_buildkit
+
+.PHONY: test_integration_buildkit_inspect_byte_exact
+test_integration_buildkit_inspect_byte_exact: ## Compare inspect vs universal layer-for-layer, byte for byte
+	@echo "Running inspect-engine byte-exact layer comparison..."
+	@rm -f /tmp/buildcage-byte-exact-inspect.tar /tmp/buildcage-byte-exact-universal.tar
+	@COMPOSE_FILE=compose.yaml:compose.test-inspect.yaml \
+	  $(MAKE) setup_buildkit_inspect_audit
+	@docker buildx build --no-cache \
+	  --builder buildcage \
+	  --platform linux/arm64 \
+	  --build-arg SOURCE_DATE_EPOCH=1700000000 \
+	  --output type=docker,name=buildcage-byte-exact-inspect,rewrite-timestamp=true,unpack=false,dest=/tmp/buildcage-byte-exact-inspect.tar \
+	  --progress=plain -f test/Dockerfile.inspect-byte-exact test/
+	@TEST_COMPOSE_FILE=compose.test-inspect.yaml $(MAKE) clean_buildkit
+	@COMPOSE_FILE=compose.yaml:compose.test-universal.yaml \
+	  $(MAKE) setup_buildkit_universal_audit
+	@docker buildx build --no-cache \
+	  --builder buildcage \
+	  --platform linux/arm64 \
+	  --build-arg SOURCE_DATE_EPOCH=1700000000 \
+	  --output type=docker,name=buildcage-byte-exact-universal,rewrite-timestamp=true,unpack=false,dest=/tmp/buildcage-byte-exact-universal.tar \
+	  --progress=plain -f test/Dockerfile.inspect-byte-exact test/
+	@TEST_COMPOSE_FILE=compose.test-universal.yaml $(MAKE) clean_buildkit
+	@docker load -i /tmp/buildcage-byte-exact-inspect.tar
+	@docker load -i /tmp/buildcage-byte-exact-universal.tar
+	@./test/assert-inspect-byte-exact.sh buildcage-byte-exact-universal buildcage-byte-exact-inspect
+	@docker rmi buildcage-byte-exact-inspect buildcage-byte-exact-universal
+	@rm -f /tmp/buildcage-byte-exact-inspect.tar /tmp/buildcage-byte-exact-universal.tar
 
 .PHONY: test_integration_buildkit_inspect_roundtrip
 test_integration_buildkit_inspect_roundtrip: ## Learn rules from an inspect audit run, then enforce them

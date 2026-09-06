@@ -100,14 +100,14 @@ func loadSpec(bundle string) (*spec, error) {
 	return s, nil
 }
 
-// setEnv adds variables to the process spec and writes it back.
-func (s *spec) setEnv(extra map[string]string) error {
+// setEnv adds variables to the process spec in memory; call save to persist.
+func (s *spec) setEnv(extra map[string]string) {
 	if len(extra) == 0 {
-		return nil
+		return
 	}
 	proc, ok := s.raw["process"].(map[string]any)
 	if !ok {
-		return nil
+		return
 	}
 	env, _ := proc["env"].([]any)
 	for key, value := range extra {
@@ -116,6 +116,9 @@ func (s *spec) setEnv(extra map[string]string) error {
 	}
 	proc["env"] = env
 	s.raw["process"] = proc
+}
+
+func (s *spec) save() error {
 	out, err := json.Marshal(s.raw)
 	if err != nil {
 		return err
@@ -123,8 +126,12 @@ func (s *spec) setEnv(extra map[string]string) error {
 	return os.WriteFile(s.path, out, 0o644)
 }
 
-// inject makes the step trust the proxy's CA and returns the undo.
-func inject(bundle string, ca []byte) (func(), error) {
+// inject makes the step trust the proxy's CA and returns a function that
+// finishes the injection once the step has exited: diffing each mirrored
+// directory against its pre-step state and writing back only what changed.
+// A non-nil error from it means the write-back itself failed and the build
+// must not proceed with a possibly half-written layer.
+func inject(bundle string, ca []byte) (func() error, error) {
 	s, err := loadSpec(bundle)
 	if err != nil {
 		return nil, err
@@ -202,31 +209,64 @@ func inject(bundle string, ca []byte) (func(), error) {
 		}
 	}
 
-	appended := make([]string, 0, len(targets))
-	for target := range targets {
-		if err := appendCA(target, ca); err != nil {
-			logf("cannot add the CA to %s: %v", target, err)
+	var binds []*dirBind
+	for hostDir, files := range groupTargetsByDir(targets) {
+		containerDir := containerPathOf(s.rootfs, hostDir)
+		if containerDir == "/" {
+			logf("refusing to bind the container root; skipping CA injection for %v", files)
 			continue
 		}
-		appended = append(appended, target)
+		if mountConflicts(s.raw, containerDir) {
+			logf("a mount already covers %s; skipping CA injection there", containerDir)
+			continue
+		}
+
+		scratch, err := newScratchDir(bundle)
+		if err != nil {
+			logf("cannot create a scratch directory for %s: %v", containerDir, err)
+			continue
+		}
+		names := make([]string, len(files))
+		for i, f := range files {
+			names[i] = filepath.Base(f)
+		}
+		b := &dirBind{
+			hostDir:      hostDir,
+			containerDir: containerDir,
+			scratchDir:   scratch,
+			bundleFiles:  names,
+			custom:       !(haveSystemStore && hostDir == filepath.Dir(systemStore)),
+		}
+		if err := b.prepare(ca); err != nil {
+			logf("cannot prepare CA injection for %s: %v", containerDir, err)
+			b.cleanup()
+			continue
+		}
+		addBindMount(s.raw, containerDir, scratch)
+		binds = append(binds, b)
 	}
 
-	if err := s.setEnv(newEnv); err != nil {
-		logf("cannot update the process environment: %v", err)
+	s.setEnv(newEnv)
+	if err := s.save(); err != nil {
+		logf("cannot update the process spec: %v", err)
 	}
 
-	return func() {
-		// The environment lives only in config.json, which is not part of the
-		// snapshot, so only the files have to be undone.
-		for _, target := range appended {
-			if err := removeCA(target); err != nil {
-				logf("cannot remove the CA from %s: %v", target, err)
+	return func() error {
+		var firstErr error
+		for _, b := range binds {
+			if err := b.finish(); err != nil {
+				logf("CA write-back failed for %s: %v", b.containerDir, err)
+				if firstErr == nil {
+					firstErr = err
+				}
 			}
+			b.cleanup()
 		}
 		if createdOwnCA != "" {
 			if err := os.Remove(createdOwnCA); err != nil && !os.IsNotExist(err) {
 				logf("cannot remove %s: %v", createdOwnCA, err)
 			}
 		}
+		return firstErr
 	}, nil
 }
