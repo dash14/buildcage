@@ -75,7 +75,8 @@ RUN apk add --no-cache \
       haproxy \
       openssl \
       iptables \
-      quickjs-ng
+      quickjs-ng \
+      rsync
 
 ENV S6_KEEP_ENV=1
 ENV S6_LOGGING=0

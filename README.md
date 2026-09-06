@@ -372,6 +372,19 @@ RUN curl https://internal.example.com/pkg.tgz -o pkg.tgz   # this step starts wi
                                                               # of the proxy-CA-only fallback
 ```
 
+**The CA store's directory is a mount point for the step's duration**, so removing or renaming the
+directory itself (not files inside it) fails instead of succeeding:
+
+```dockerfile
+RUN rm -rf /etc/ssl/certs        # fails: the directory is a mount point and can't be removed itself
+RUN rm -rf /etc/ssl/certs/*      # fine: removing what's inside it works normally
+```
+
+The same applies to a Dockerfile-chosen custom path (an already-set CA-trust variable pointing
+somewhere of its own), unless its directory is unexpectedly large (more than 20 MiB or 512 files), in
+which case injection is skipped for that variable only, the same graceful degradation as when no CA
+bundle is found at all.
+
 See [Inspect Proxy Engine](./docs/security.md#inspect-proxy-engine) for the threat model and attack
 resistance.
 

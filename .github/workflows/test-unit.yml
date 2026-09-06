@@ -58,6 +58,14 @@ jobs:
 
       - uses: ./.github/actions/setup-vp
 
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26"
+
+      - name: Test buildcage-runc (inspect engine)
+        working-directory: docker/inspect/buildcage-runc
+        run: go test ./...
+
       - name: Typecheck
         run: vp run typecheck
 
